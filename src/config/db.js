@@ -6,20 +6,31 @@ const connectDB = async () => {
   try {
     const mongoUri = process.env.MONGODB_URI;
 
+    // Use Memory Server during test mode
+    if (process.env.NODE_ENV === 'test') {
+      const { MongoMemoryServer } = require('mongodb-memory-server');
+      mongoServer = await MongoMemoryServer.create();
+      const uri = mongoServer.getUri();
+      await mongoose.connect(uri);
+      return;
+    }
+
     if (mongoUri && mongoUri !== 'mongodb://localhost:27017/tasklanka_memory') {
       try {
-        console.log(`Connecting to MongoDB at ${mongoUri.split('@').pop()}...`);
+        const maskedUri = mongoUri.replace(/\/\/([^:]+):([^@]+)@/, '//$1:****@');
+        console.log(`Connecting to MongoDB Atlas at ${maskedUri}...`);
         await mongoose.connect(mongoUri, {
-          serverSelectionTimeoutMS: 3000
+          serverSelectionTimeoutMS: 10000,
+          connectTimeoutMS: 10000
         });
-        console.log('MongoDB connected successfully via URI.');
+        console.log('MongoDB Atlas connected successfully.');
         return;
       } catch (uriErr) {
         console.warn('Could not connect to external MongoDB URI, falling back to embedded MongoDB engine:', uriErr.message);
       }
     }
 
-    // Zero-config fallback: MongoMemoryServer for instant execution without local Mongo installation
+    // Fallback: MongoMemoryServer for instant offline execution if needed
     const { MongoMemoryServer } = require('mongodb-memory-server');
     mongoServer = await MongoMemoryServer.create();
     const uri = mongoServer.getUri();
