@@ -4,8 +4,10 @@ const workerController = require('../controllers/workerController');
 const { protect, authorize } = require('../middleware/auth');
 const { ROLES } = require('../config/constants');
 
-// Public worker discovery
+// Public worker discovery & seed
 router.get('/', workerController.getWorkers);
+router.get('/seed', workerController.triggerSeed);
+router.post('/seed', workerController.triggerSeed);
 router.get('/:id', workerController.getWorkerById);
 
 // Worker authenticated actions

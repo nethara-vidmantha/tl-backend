@@ -1,5 +1,6 @@
 const workerService = require('../services/workerService');
 const { successResponse } = require('../utils/responseHandler');
+const seedDatabase = require('../utils/seedData');
 
 const getWorkers = async (req, res, next) => {
   try {
@@ -39,9 +40,19 @@ const toggleAvailability = async (req, res, next) => {
   }
 };
 
+const triggerSeed = async (req, res, next) => {
+  try {
+    await seedDatabase();
+    return successResponse(res, 200, 'TaskLanka database seeded with 15+ verified Sri Lankan workers successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getWorkers,
   getWorkerById,
   updateProfile,
-  toggleAvailability
+  toggleAvailability,
+  triggerSeed
 };

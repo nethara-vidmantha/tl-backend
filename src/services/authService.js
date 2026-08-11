@@ -1,79 +1,94 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Worker = require('../models/Worker');
-const { JWT_SECRET } = require('../middleware/auth');
 const { ROLES } = require('../config/constants');
 const { getDistrictCoordinates } = require('./locationService');
+const { sendPasswordResetEmail } = require('./emailService');
 
-/**
- * Generate signed JWT
- */
 const generateToken = (user) => {
   return jwt.sign(
     {
       id: user._id,
       email: user.email,
-      role: user.role,
-      name: user.name
+      role: user.role
     },
-    JWT_SECRET,
-    { expiresIn: '30d' }
+    process.env.JWT_SECRET || 'tasklanka_secret_key',
+    {
+      expiresIn: '30d'
+    }
   );
 };
 
 /**
- * Register a new User
+ * Register a new user (Customer or Worker)
  */
 const registerUser = async (userData) => {
-  const { name, email, password, phone, role = ROLES.CUSTOMER, language = 'en', category, district = 'Colombo', hourlyRate = 1500, address, profileImage } = userData;
+  const {
+    name,
+    email,
+    password,
+    phone,
+    role = ROLES.CUSTOMER,
+    language = 'en',
+    district = 'Colombo',
+    address,
+    profileImage,
+    category,
+    hourlyRate,
+    experience,
+    skills,
+    nicNumber
+  } = userData;
 
+  // Check if user already exists
   const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
   if (existingUser) {
-    throw new Error('An account with this email already exists.');
+    throw new Error('A user with this email address already exists.');
   }
 
+  // Calculate coordinates based on district
   const districtCoords = getDistrictCoordinates(district);
 
-  const defaultAvatar = role === ROLES.WORKER
-    ? 'https://images.unsplash.com/photo-1540569014015-19a7be504e3a?auto=format&fit=crop&w=300&q=80'
-    : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80';
-
+  // 1. Create Base User
   const user = await User.create({
-    name: name.trim(),
+    name,
     email: email.toLowerCase().trim(),
     password,
-    phone: phone.trim(),
+    phone,
     role,
     language,
-    profileImage: profileImage || defaultAvatar,
+    profileImage: profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=300&q=80',
     location: {
       address: address || `${district}, Sri Lanka`,
-      district,
+      district: district || 'Colombo',
       latitude: districtCoords.latitude,
       longitude: districtCoords.longitude
     }
   });
 
+  // 2. If registering as a Worker, create Worker profile
   let workerProfile = null;
-
-  // If user registers as a worker, automatically initialize their Worker profile
   if (role === ROLES.WORKER) {
     workerProfile = await Worker.create({
       userId: user._id,
+      name: user.name,
+      phone: user.phone,
       category: category || 'plumbing',
+      hourlyRate: hourlyRate || 1500,
+      profileImage: user.profileImage,
       district: district || 'Colombo',
       address: address || `${district}, Sri Lanka`,
-      latitude: districtCoords.latitude,
-      longitude: districtCoords.longitude,
-      hourlyRate: Number(hourlyRate) || 1500,
-      pricing: {
-        basePrice: 500,
-        hourlyRate: Number(hourlyRate) || 1500
+      location: {
+        type: 'Point',
+        coordinates: [districtCoords.longitude, districtCoords.latitude]
       },
-      profileImage: profileImage || defaultAvatar,
-      verified: false,
-      verificationStatus: 'Pending',
-      availability: true
+      experience: experience || 2,
+      skills: Array.isArray(skills) ? skills : ['General Repairs'],
+      nicVerification: {
+        nicNumber: nicNumber || '',
+        verified: false
+      },
+      verified: true // Auto-verified for instant marketplace onboarding
     });
   }
 
@@ -96,7 +111,7 @@ const registerUser = async (userData) => {
 };
 
 /**
- * Log in existing user
+ * Login existing user
  */
 const loginUser = async (email, password) => {
   const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
@@ -140,9 +155,30 @@ const loginUser = async (email, password) => {
  * Google Auth Handler (Sign In / Sign Up with Google)
  */
 const googleAuth = async (googleData) => {
-  const { email, name, profileImage, googleId, role = ROLES.CUSTOMER } = googleData;
-  const userEmail = (email || 'google.user@tasklanka.lk').toLowerCase().trim();
+  let { email, name, profileImage, accessToken, idToken, role = ROLES.CUSTOMER } = googleData;
 
+  // If accessToken is provided, verify with Google UserInfo API
+  if (accessToken) {
+    try {
+      const gRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      if (gRes.ok) {
+        const gInfo = await gRes.json();
+        email = gInfo.email || email;
+        name = gInfo.name || name;
+        profileImage = gInfo.picture || profileImage;
+      }
+    } catch (gErr) {
+      console.warn('Google userinfo fetch fallback:', gErr.message);
+    }
+  }
+
+  if (!email) {
+    throw new Error('Google authentication failed: Email is required.');
+  }
+
+  const userEmail = email.toLowerCase().trim();
   let user = await User.findOne({ email: userEmail });
 
   if (!user) {
@@ -163,6 +199,9 @@ const googleAuth = async (googleData) => {
         longitude: districtCoords.longitude
       }
     });
+  } else if (profileImage && (!user.profileImage || user.profileImage.includes('unsplash'))) {
+    user.profileImage = profileImage;
+    await user.save();
   }
 
   let workerProfile = null;
@@ -189,7 +228,7 @@ const googleAuth = async (googleData) => {
 };
 
 /**
- * Request Password Reset / OTP
+ * Request Password Reset / OTP with Real Email Sending
  */
 const requestPasswordReset = async (email) => {
   const user = await User.findOne({ email: email.toLowerCase().trim() });
@@ -203,9 +242,11 @@ const requestPasswordReset = async (email) => {
   user.resetPasswordExpire = Date.now() + 15 * 60 * 1000; // 15 mins
   await user.save();
 
+  // Send real email via Gmail SMTP
+  await sendPasswordResetEmail(user.email, otp, user.name);
+
   return {
-    message: 'A 6-digit reset code has been sent to your email address.',
-    otp // Returned for instant testing simulation
+    message: 'A 6-digit verification code has been sent to your email address.'
   };
 };
 
@@ -273,45 +314,48 @@ const getUserProfile = async (userId) => {
 };
 
 /**
- * Update user profile (name, phone, profile image, location, etc.)
+ * Update user profile
  */
 const updateUserProfile = async (userId, updateData) => {
-  const { name, phone, language, profileImage, location, district, address } = updateData;
+  const { name, phone, language, address, district, profileImage } = updateData;
 
   const user = await User.findById(userId);
   if (!user) {
     throw new Error('User not found.');
   }
 
-  if (name && name.trim()) user.name = name.trim();
-  if (phone && phone.trim()) user.phone = phone.trim();
+  if (name) user.name = name;
+  if (phone) user.phone = phone;
   if (language) user.language = language;
   if (profileImage) user.profileImage = profileImage;
 
-  if (district || address || location) {
-    const targetDistrict = district || location?.district || user.location?.district || 'Colombo';
-    const targetAddress = address || location?.address || user.location?.address || `${targetDistrict}, Sri Lanka`;
-    const coords = getDistrictCoordinates(targetDistrict);
-
+  if (district || address) {
+    const d = district || user.location?.district || 'Colombo';
+    const coords = getDistrictCoordinates(d);
     user.location = {
-      district: targetDistrict,
-      address: targetAddress,
-      latitude: location?.latitude || coords.latitude,
-      longitude: location?.longitude || coords.longitude
+      district: d,
+      address: address || user.location?.address || `${d}, Sri Lanka`,
+      latitude: coords.latitude,
+      longitude: coords.longitude
     };
   }
 
   await user.save();
 
+  // If user is a worker, sync name and profileImage to Worker model
   let workerProfile = null;
   if (user.role === ROLES.WORKER) {
-    workerProfile = await Worker.findOne({ userId: user._id });
-    if (workerProfile) {
-      if (profileImage) workerProfile.profileImage = profileImage;
-      if (district) workerProfile.district = district;
-      if (address) workerProfile.address = address;
-      await workerProfile.save();
-    }
+    workerProfile = await Worker.findOneAndUpdate(
+      { userId: user._id },
+      {
+        name: user.name,
+        phone: user.phone,
+        profileImage: user.profileImage,
+        district: user.location.district,
+        address: user.location.address
+      },
+      { new: true }
+    );
   }
 
   return {
@@ -334,6 +378,5 @@ module.exports = {
   requestPasswordReset,
   resetPassword,
   getUserProfile,
-  updateUserProfile,
-  generateToken
+  updateUserProfile
 };
